@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>To Do List Reminder</title>
+  <style>
+    body { font-family: Arial; background: #f0f2f5; text-align: center; margin-top: 50px; }
+    .container { background: white; width: 400px; margin: auto; padding: 25px; border-radius: 10px; box-shadow: 0 0 12px rgba(0,0,0,0.2); }
+    h2 { color: #333; }
+    input, button { padding: 10px; margin: 6px; width: 90%; font-size: 15px; border-radius: 6px; border: 1px solid #ccc; }
+    button { background: #4CAF50; color: white; border: none; cursor: pointer; }
+    .stop { background: red; }
+    .task { background: #eee; padding: 10px; margin-top: 8px; border-radius: 6px; text-align: left; }
+    .completed { text-decoration: line-through; color: gray; }
+    .smallbtn { width: auto; padding: 5px 8px; font-size: 12px; margin: 3px; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h2>To Do List Reminder</h2>
+  <input type="text" id="taskInput" placeholder="Enter Task">
+  <input type="time" id="timeInput">
+  <button onclick="addTask()">Add Task</button>
+  <button class="stop" onclick="stopAlarm()">Stop Alarm</button>
+  <div id="taskList"></div>
+  <audio id="alarmSound" loop preload="auto">
+    <source src="https://www.soundjay.com/misc/sounds/bell-ringing-05.mp3" type="audio/mpeg">
+  </audio>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const taskInput = document.getElementById("taskInput");
+  const timeInput = document.getElementById("timeInput");
+  const taskList = document.getElementById("taskList");
+  const alarmSound = document.getElementById("alarmSound");
+
+  let tasks = [];
+  let alarms = {};
+  let audioUnlocked = false;
+
+  document.body.addEventListener("click", () => {
+    if (!audioUnlocked) {
+      alarmSound.play().then(() => alarmSound.pause());
+      audioUnlocked = true;
+    }
+  });
+
+  async function loadTasks() {
+    const res = await fetch("/api/tasks");
+    tasks = await res.json();
+    displayTasks();
+  }
+
+  function displayTasks() {
+    taskList.innerHTML = "";
+    tasks.forEach(task => {
+      const div = document.createElement("div");
+      div.className = "task" + (task.done ? " completed" : "");
+      div.innerHTML = `
+        <b>${task.text}</b><br>${task.time}<br>
+        <button class="smallbtn" onclick="completeTask(${task.id})">Complete</button>
+        <button class="smallbtn" onclick="editTask(${task.id})">Edit</button>
+        <button class="smallbtn stop" onclick="deleteTask(${task.id})">Delete</button>
+      `;
+      taskList.appendChild(div);
+    });
+  }
+
+  window.addTask = async function() {
+    const text = taskInput.value;
+    const time = timeInput.value;
+    if (!text || !time) { alert("Enter task and time"); return; }
+    const res = await fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, time })
+    });
+    const newTask = await res.json();
+    tasks.push(newTask);
+    taskInput.value = "";
+    displayTasks();
+  }
+
+  window.completeTask = async function(id) {
+    await fetch(`/api/tasks/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ done: true })
+    });
+    speechSynthesis.speak(new SpeechSynthesisUtterance("Task completed"));
+    await loadTasks();
+  }
+
+  window.editTask = async function(id) {
+    const task = tasks.find(t => t.id === id);
+    const newText = prompt("Edit task", task.text);
+    if (newText) {
+      await fetch(`/api/tasks/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: newText })
+      });
+      await loadTasks();
+    }
+  }
+
+  window.deleteTask = async function(id) {
+    await fetch(`/api/tasks/${id}`, { method: "DELETE" });
+    tasks = tasks.filter(t => t.id !== id);
+    displayTasks();
+  }
+
+  window.stopAlarm = function() {
+    Object.values(alarms).forEach(a => {
+      a.audio.pause();
+      a.audio.currentTime = 0;
+      clearInterval(a.voiceRepeat);
+    });
+    alarms = {};
+    speechSynthesis.cancel();
+  }
+
+  setInterval(() => {
+    if (!audioUnlocked) return;
+    const now = new Date();
+    const hh = now.getHours().toString().padStart(2,"0");
+    const mm = now.getMinutes().toString().padStart(2,"0");
+    const currentTime = `${hh}:${mm}`;
+
+    tasks.forEach(task => {
+      if (task.time === currentTime && !task.done && !alarms[task.id]) {
+        const audio = alarmSound;
+        audio.play();
+        const voiceRepeat = setInterval(() => {
+          speechSynthesis.speak(new SpeechSynthesisUtterance(`Reminder: ${task.text}`));
+        }, 5000);
+        alarms[task.id] = { audio, voiceRepeat };
+      }
+    });
+  }, 1000);
+
+  loadTasks();
+});
+</script>
+</body>
+</html>
