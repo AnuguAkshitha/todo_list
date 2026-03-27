@@ -1,147 +1,232 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>To Do List Reminder</title>
-  <style>
-    body { font-family: Arial; background: #f0f2f5; text-align: center; margin-top: 50px; }
-    .container { background: white; width: 400px; margin: auto; padding: 25px; border-radius: 10px; box-shadow: 0 0 12px rgba(0,0,0,0.2); }
-    h2 { color: #333; }
-    input, button { padding: 10px; margin: 6px; width: 90%; font-size: 15px; border-radius: 6px; border: 1px solid #ccc; }
-    button { background: #4CAF50; color: white; border: none; cursor: pointer; }
-    .stop { background: red; }
-    .task { background: #eee; padding: 10px; margin-top: 8px; border-radius: 6px; text-align: left; }
-    .completed { text-decoration: line-through; color: gray; }
-    .smallbtn { width: auto; padding: 5px 8px; font-size: 12px; margin: 3px; }
-  </style>
+<meta charset="UTF-8">
+<title>To Do List Reminder</title>
+<style>
+body { font-family: Arial; background: #f0f2f5; text-align: center; margin-top: 50px; }
+.container { background: white; width: 400px; margin: auto; padding: 25px; border-radius: 10px; box-shadow: 0 0 12px rgba(0,0,0,0.2); }
+h2 { color: #333; }
+input, button, select { padding: 10px; margin: 6px; width: 90%; font-size: 15px; border-radius: 6px; border: 1px solid #ccc; }
+button { background: #4CAF50; color: white; border: none; cursor: pointer; }
+.stop { background: red; }
+.task { background: #eee; padding: 10px; margin-top: 8px; border-radius: 6px; text-align: left; }
+.completed { text-decoration: line-through; color: gray; }
+.smallbtn { width: auto; padding: 5px 8px; font-size: 12px; margin: 3px; }
+#alarmBanner { display: none; background: #ff4444; color: white; padding: 10px; border-radius: 6px; margin-bottom: 10px; font-weight: bold; }
+</style>
 </head>
 <body>
+
 <div class="container">
   <h2>To Do List Reminder</h2>
-  <input type="text" id="taskInput" placeholder="Enter Task">
-  <input type="time" id="timeInput">
+  <div id="alarmBanner">🔔 ALARM RINGING! Press Stop Alarm to dismiss.</div>
+  <input type="text" id="taskInput" placeholder="Enter Task"><br>
+  <input type="date" id="dateInput"><br>
+  <input type="time" id="timeInput"><br>
+  <select id="priorityInput">
+    <option value="Low">Low</option>
+    <option value="Medium">Medium</option>
+    <option value="High">High</option>
+  </select><br>
   <button onclick="addTask()">Add Task</button>
   <button class="stop" onclick="stopAlarm()">Stop Alarm</button>
   <div id="taskList"></div>
-  <audio id="alarmSound" loop preload="auto">
-    <source src="https://www.soundjay.com/misc/sounds/bell-ringing-05.mp3" type="audio/mpeg">
-  </audio>
 </div>
 
 <script>
-document.addEventListener("DOMContentLoaded", () => {
-  const taskInput = document.getElementById("taskInput");
-  const timeInput = document.getElementById("timeInput");
+let tasks = [];
+let activeAlarms = {};
+let dismissedAlarms = new Set();
+let audioCtx = null;
+let alarmNodes = [];
+let voiceInterval = null;
+let audioUnlocked = false;
+let alarmRinging = false;
+
+document.body.addEventListener("click", unlockAudio, { once: false });
+
+function unlockAudio() {
+  if (!audioUnlocked) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    audioUnlocked = true;
+  } else if (audioCtx && audioCtx.state === "suspended") {
+    audioCtx.resume();
+  }
+}
+
+function playAlarmSound() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  stopAlarmSound();
+
+  function beep(startTime, freq, dur) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.5, startTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, startTime + dur);
+    osc.start(startTime);
+    osc.stop(startTime + dur);
+    alarmNodes.push(osc);
+  }
+
+  function scheduleLoop() {
+    if (!alarmRinging) return;
+    const now = audioCtx.currentTime;
+    beep(now + 0.0, 880, 0.3);
+    beep(now + 0.4, 1100, 0.3);
+    beep(now + 0.8, 880, 0.3);
+    beep(now + 1.2, 1100, 0.3);
+    setTimeout(() => { if (alarmRinging) scheduleLoop(); }, 2000);
+  }
+
+  scheduleLoop();
+}
+
+function stopAlarmSound() {
+  alarmNodes.forEach(n => { try { n.stop(); } catch(e) {} });
+  alarmNodes = [];
+}
+
+function startVoiceAnnouncement(taskText) {
+  if (voiceInterval) clearInterval(voiceInterval);
+  function announce() {
+    if (!alarmRinging) return;
+    speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance("Reminder: " + taskText);
+    utter.rate = 0.9;
+    speechSynthesis.speak(utter);
+  }
+  announce();
+  voiceInterval = setInterval(announce, 4000);
+}
+
+function stopAlarm() {
+  alarmRinging = false;
+  Object.keys(activeAlarms).forEach(id => dismissedAlarms.add(Number(id)));
+  activeAlarms = {};
+  stopAlarmSound();
+  if (voiceInterval) { clearInterval(voiceInterval); voiceInterval = null; }
+  speechSynthesis.cancel();
+  document.getElementById("alarmBanner").style.display = "none";
+}
+
+async function loadTasks() {
+  try {
+    const res = await fetch("/api/tasks");
+    if (res.ok) { tasks = await res.json(); displayTasks(); }
+  } catch (e) { console.error("Load error:", e); }
+}
+
+function displayTasks() {
   const taskList = document.getElementById("taskList");
-  const alarmSound = document.getElementById("alarmSound");
+  taskList.innerHTML = "";
+  tasks.forEach(task => {
+    const div = document.createElement("div");
+    div.className = "task" + (task.done ? " completed" : "");
+    div.innerHTML = `
+      <b>${task.text}</b> <span style="color:#888;font-size:12px">[${task.priority}]</span><br>
+      <small>📅 ${task.date} &nbsp; ⏰ ${task.time}</small><br>
+      <button class="smallbtn" style="background:#4CAF50;color:white" onclick="completeTask(${task.id})">✔ Complete</button>
+      <button class="smallbtn" style="background:#888;color:white" onclick="editTask(${task.id})">✏ Edit</button>
+      <button class="smallbtn stop" onclick="deleteTask(${task.id})">🗑 Delete</button>
+    `;
+    taskList.appendChild(div);
+  });
+}
 
-  let tasks = [];
-  let alarms = {};
-  let audioUnlocked = false;
+async function addTask() {
+  unlockAudio();
+  const text = document.getElementById("taskInput").value.trim();
+  const date = document.getElementById("dateInput").value;
+  const time = document.getElementById("timeInput").value;
+  const priority = document.getElementById("priorityInput").value;
+  if (!text || !date || !time) { alert("Enter task, date and time"); return; }
 
-  document.body.addEventListener("click", () => {
-    if (!audioUnlocked) {
-      alarmSound.play().then(() => alarmSound.pause());
-      audioUnlocked = true;
+  const res = await fetch("/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, date, time, priority })
+  });
+  if (res.ok) {
+    document.getElementById("taskInput").value = "";
+    document.getElementById("dateInput").value = "";
+    document.getElementById("timeInput").value = "";
+    await loadTasks();
+  } else {
+    const r = await res.json();
+    alert(r.error || "Failed to add task");
+  }
+}
+
+async function completeTask(id) {
+  await fetch("/api/tasks/" + id, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ done: true })
+  });
+  delete activeAlarms[id];
+  dismissedAlarms.delete(id);
+  if (Object.keys(activeAlarms).length === 0) stopAlarm();
+  speechSynthesis.cancel();
+  speechSynthesis.speak(new SpeechSynthesisUtterance("Task completed"));
+  await loadTasks();
+}
+
+async function editTask(id) {
+  const task = tasks.find(t => t.id === id);
+  const newText = prompt("Edit task:", task.text);
+  if (newText && newText.trim()) {
+    await fetch("/api/tasks/" + id, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: newText.trim() })
+    });
+    await loadTasks();
+  }
+}
+
+async function deleteTask(id) {
+  await fetch("/api/tasks/" + id, { method: "DELETE" });
+  delete activeAlarms[id];
+  dismissedAlarms.delete(id);
+  if (Object.keys(activeAlarms).length === 0) stopAlarm();
+  await loadTasks();
+}
+
+setInterval(() => {
+  if (!audioUnlocked || !tasks.length) return;
+  const now = new Date();
+  const hh = now.getHours().toString().padStart(2, "0");
+  const mm = now.getMinutes().toString().padStart(2, "0");
+  const today = now.toISOString().slice(0, 10);
+  const currentTime = `${hh}:${mm}`;
+  let newAlarmTask = null;
+
+  tasks.forEach(task => {
+    const taskTime = task.time.slice(0, 5);
+    if (task.date === today && taskTime === currentTime && !task.done && !activeAlarms[task.id] && !dismissedAlarms.has(task.id)) {
+      activeAlarms[task.id] = task.text;
+      newAlarmTask = task;
     }
   });
 
-  async function loadTasks() {
-    const res = await fetch("/api/tasks");
-    tasks = await res.json();
-    displayTasks();
+  if (newAlarmTask && !alarmRinging) {
+    alarmRinging = true;
+    document.getElementById("alarmBanner").style.display = "block";
+    document.getElementById("alarmBanner").textContent = "🔔 ALARM: " + newAlarmTask.text + " — Press Stop Alarm to dismiss.";
+    playAlarmSound();
+    startVoiceAnnouncement(newAlarmTask.text);
   }
+}, 1000);
 
-  function displayTasks() {
-    taskList.innerHTML = "";
-    tasks.forEach(task => {
-      const div = document.createElement("div");
-      div.className = "task" + (task.done ? " completed" : "");
-      div.innerHTML = `
-        <b>${task.text}</b><br>${task.time}<br>
-        <button class="smallbtn" onclick="completeTask(${task.id})">Complete</button>
-        <button class="smallbtn" onclick="editTask(${task.id})">Edit</button>
-        <button class="smallbtn stop" onclick="deleteTask(${task.id})">Delete</button>
-      `;
-      taskList.appendChild(div);
-    });
-  }
-
-  window.addTask = async function() {
-    const text = taskInput.value;
-    const time = timeInput.value;
-    if (!text || !time) { alert("Enter task and time"); return; }
-    const res = await fetch("/api/tasks", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, time })
-    });
-    const newTask = await res.json();
-    tasks.push(newTask);
-    taskInput.value = "";
-    displayTasks();
-  }
-
-  window.completeTask = async function(id) {
-    await fetch(`/api/tasks/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ done: true })
-    });
-    speechSynthesis.speak(new SpeechSynthesisUtterance("Task completed"));
-    await loadTasks();
-  }
-
-  window.editTask = async function(id) {
-    const task = tasks.find(t => t.id === id);
-    const newText = prompt("Edit task", task.text);
-    if (newText) {
-      await fetch(`/api/tasks/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: newText })
-      });
-      await loadTasks();
-    }
-  }
-
-  window.deleteTask = async function(id) {
-    await fetch(`/api/tasks/${id}`, { method: "DELETE" });
-    tasks = tasks.filter(t => t.id !== id);
-    displayTasks();
-  }
-
-  window.stopAlarm = function() {
-    Object.values(alarms).forEach(a => {
-      a.audio.pause();
-      a.audio.currentTime = 0;
-      clearInterval(a.voiceRepeat);
-    });
-    alarms = {};
-    speechSynthesis.cancel();
-  }
-
-  setInterval(() => {
-    if (!audioUnlocked) return;
-    const now = new Date();
-    const hh = now.getHours().toString().padStart(2,"0");
-    const mm = now.getMinutes().toString().padStart(2,"0");
-    const currentTime = `${hh}:${mm}`;
-
-    tasks.forEach(task => {
-      if (task.time === currentTime && !task.done && !alarms[task.id]) {
-        const audio = alarmSound;
-        audio.play();
-        const voiceRepeat = setInterval(() => {
-          speechSynthesis.speak(new SpeechSynthesisUtterance(`Reminder: ${task.text}`));
-        }, 5000);
-        alarms[task.id] = { audio, voiceRepeat };
-      }
-    });
-  }, 1000);
-
-  loadTasks();
-});
+loadTasks();
+setInterval(loadTasks, 30000);
 </script>
 </body>
 </html>
