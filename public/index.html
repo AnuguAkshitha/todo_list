@@ -14,12 +14,14 @@ button { background: #4CAF50; color: white; border: none; cursor: pointer; }
 .completed { text-decoration: line-through; color: gray; }
 .smallbtn { width: auto; padding: 5px 8px; font-size: 12px; margin: 3px; }
 #alarmBanner { display: none; background: #ff4444; color: white; padding: 10px; border-radius: 6px; margin-bottom: 10px; font-weight: bold; }
+#statusMsg { font-size: 12px; color: #888; margin-bottom: 6px; }
 </style>
 </head>
 <body>
 
 <div class="container">
   <h2>To Do List Reminder</h2>
+  <div id="statusMsg"></div>
   <div id="alarmBanner">🔔 ALARM RINGING! Press Stop Alarm to dismiss.</div>
   <input type="text" id="taskInput" placeholder="Enter Task"><br>
   <input type="date" id="dateInput"><br>
@@ -35,15 +37,25 @@ button { background: #4CAF50; color: white; border: none; cursor: pointer; }
 </div>
 
 <script>
-let tasks = [];
-let activeAlarms = {};
-let dismissedAlarms = new Set();
-let audioCtx = null;
-let alarmNodes = [];
-let voiceInterval = null;
-let audioUnlocked = false;
-let alarmRinging = false;
+// ── User identity ─────────────────────────────────────────────────────────────
+function getOrCreateUserId() {
+  let id = localStorage.getItem("todoUserId");
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem("todoUserId", id); }
+  return id;
+}
+const USER_ID = getOrCreateUserId();
 
+// ── State ─────────────────────────────────────────────────────────────────────
+let tasks           = [];
+let activeAlarms    = {};
+let dismissedAlarms = new Set();
+let audioCtx        = null;
+let alarmNodes      = [];
+let voiceInterval   = null;
+let audioUnlocked   = false;
+let alarmRinging    = false;
+
+// ── Unlock audio on first click ───────────────────────────────────────────────
 document.body.addEventListener("click", unlockAudio, { once: false });
 
 function unlockAudio() {
@@ -56,19 +68,20 @@ function unlockAudio() {
   }
 }
 
+// ── Alarm sound (Web Audio API) ───────────────────────────────────────────────
 function playAlarmSound() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === "suspended") audioCtx.resume();
+  audioCtx.resume();
   stopAlarmSound();
 
   function beep(startTime, freq, dur) {
-    const osc = audioCtx.createOscillator();
+    const osc  = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.connect(gain);
     gain.connect(audioCtx.destination);
     osc.type = "sine";
     osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.5, startTime);
+    gain.gain.setValueAtTime(0.6, startTime);
     gain.gain.exponentialRampToValueAtTime(0.001, startTime + dur);
     osc.start(startTime);
     osc.stop(startTime + dur);
@@ -78,13 +91,12 @@ function playAlarmSound() {
   function scheduleLoop() {
     if (!alarmRinging) return;
     const now = audioCtx.currentTime;
-    beep(now + 0.0, 880, 0.3);
+    beep(now + 0.0, 880,  0.3);
     beep(now + 0.4, 1100, 0.3);
-    beep(now + 0.8, 880, 0.3);
+    beep(now + 0.8, 880,  0.3);
     beep(now + 1.2, 1100, 0.3);
     setTimeout(() => { if (alarmRinging) scheduleLoop(); }, 2000);
   }
-
   scheduleLoop();
 }
 
@@ -93,19 +105,41 @@ function stopAlarmSound() {
   alarmNodes = [];
 }
 
+// ── Voice announcement ────────────────────────────────────────────────────────
 function startVoiceAnnouncement(taskText) {
   if (voiceInterval) clearInterval(voiceInterval);
   function announce() {
     if (!alarmRinging) return;
     speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance("Reminder: " + taskText);
-    utter.rate = 0.9;
-    speechSynthesis.speak(utter);
+    const u = new SpeechSynthesisUtterance("Reminder: " + taskText);
+    u.rate = 0.9;
+    speechSynthesis.speak(u);
   }
   announce();
   voiceInterval = setInterval(announce, 4000);
 }
 
+// ── Trigger alarm ─────────────────────────────────────────────────────────────
+function triggerAlarm(taskText, taskId) {
+  if (alarmRinging) return;
+  if (dismissedAlarms.has(Number(taskId))) return;
+
+  activeAlarms[taskId] = taskText;
+  alarmRinging = true;
+
+  const banner = document.getElementById("alarmBanner");
+  banner.style.display = "block";
+  banner.textContent = "🔔 ALARM: " + taskText + " — Press Stop Alarm to dismiss.";
+
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  audioCtx.resume().then(() => {
+    audioUnlocked = true;
+    playAlarmSound();
+    startVoiceAnnouncement(taskText);
+  });
+}
+
+// ── Stop alarm ────────────────────────────────────────────────────────────────
 function stopAlarm() {
   alarmRinging = false;
   Object.keys(activeAlarms).forEach(id => dismissedAlarms.add(Number(id)));
@@ -116,13 +150,40 @@ function stopAlarm() {
   document.getElementById("alarmBanner").style.display = "none";
 }
 
+// ── Listen for messages from Service Worker ───────────────────────────────────
+navigator.serviceWorker && navigator.serviceWorker.addEventListener("message", e => {
+  if (e.data && e.data.type === "PLAY_ALARM") {
+    triggerAlarm(e.data.text, e.data.id);
+  }
+});
+
+// ── Check URL params (tab opened via notification click) ──────────────────────
+(function checkUrlAlarm() {
+  const params    = new URLSearchParams(window.location.search);
+  const alarmText = params.get("alarm");
+  const alarmId   = params.get("alarmId");
+  if (alarmText && alarmId) {
+    window.addEventListener("load", () => {
+      setTimeout(() => triggerAlarm(decodeURIComponent(alarmText), Number(alarmId)), 800);
+    });
+    history.replaceState({}, "", window.location.pathname);
+  }
+})();
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+function apiHeaders() {
+  return { "Content-Type": "application/json", "x-user-id": USER_ID };
+}
+
+// ── Load tasks ────────────────────────────────────────────────────────────────
 async function loadTasks() {
   try {
-    const res = await fetch("/api/tasks");
+    const res = await fetch("/api/tasks", { headers: { "x-user-id": USER_ID } });
     if (res.ok) { tasks = await res.json(); displayTasks(); }
   } catch (e) { console.error("Load error:", e); }
 }
 
+// ── Display tasks ─────────────────────────────────────────────────────────────
 function displayTasks() {
   const taskList = document.getElementById("taskList");
   taskList.innerHTML = "";
@@ -140,23 +201,24 @@ function displayTasks() {
   });
 }
 
+// ── Add task ──────────────────────────────────────────────────────────────────
 async function addTask() {
   unlockAudio();
-  const text = document.getElementById("taskInput").value.trim();
-  const date = document.getElementById("dateInput").value;
-  const time = document.getElementById("timeInput").value;
+  const text     = document.getElementById("taskInput").value.trim();
+  const date     = document.getElementById("dateInput").value;
+  const time     = document.getElementById("timeInput").value;
   const priority = document.getElementById("priorityInput").value;
   if (!text || !date || !time) { alert("Enter task, date and time"); return; }
 
   const res = await fetch("/api/tasks", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders(),
     body: JSON.stringify({ text, date, time, priority })
   });
   if (res.ok) {
     document.getElementById("taskInput").value = "";
-    document.getElementById("dateInput").value = "";
-    document.getElementById("timeInput").value = "";
+    document.getElementById("dateInput").value  = "";
+    document.getElementById("timeInput").value  = "";
     await loadTasks();
   } else {
     const r = await res.json();
@@ -164,11 +226,10 @@ async function addTask() {
   }
 }
 
+// ── Complete task ─────────────────────────────────────────────────────────────
 async function completeTask(id) {
   await fetch("/api/tasks/" + id, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ done: true })
+    method: "PATCH", headers: apiHeaders(), body: JSON.stringify({ done: true })
   });
   delete activeAlarms[id];
   dismissedAlarms.delete(id);
@@ -178,55 +239,96 @@ async function completeTask(id) {
   await loadTasks();
 }
 
+// ── Edit task ─────────────────────────────────────────────────────────────────
 async function editTask(id) {
   const task = tasks.find(t => t.id === id);
   const newText = prompt("Edit task:", task.text);
   if (newText && newText.trim()) {
     await fetch("/api/tasks/" + id, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: newText.trim() })
+      method: "PATCH", headers: apiHeaders(), body: JSON.stringify({ text: newText.trim() })
     });
     await loadTasks();
   }
 }
 
+// ── Delete task ───────────────────────────────────────────────────────────────
 async function deleteTask(id) {
-  await fetch("/api/tasks/" + id, { method: "DELETE" });
+  await fetch("/api/tasks/" + id, { method: "DELETE", headers: { "x-user-id": USER_ID } });
   delete activeAlarms[id];
   dismissedAlarms.delete(id);
   if (Object.keys(activeAlarms).length === 0) stopAlarm();
   await loadTasks();
 }
 
+// ── In-tab alarm checker (every second) ──────────────────────────────────────
 setInterval(() => {
   if (!audioUnlocked || !tasks.length) return;
-  const now = new Date();
-  const hh = now.getHours().toString().padStart(2, "0");
-  const mm = now.getMinutes().toString().padStart(2, "0");
+  const now  = new Date();
+  const hh   = now.getHours().toString().padStart(2, "0");
+  const mm   = now.getMinutes().toString().padStart(2, "0");
   const today = now.toISOString().slice(0, 10);
   const currentTime = `${hh}:${mm}`;
-  let newAlarmTask = null;
 
   tasks.forEach(task => {
     const taskTime = task.time.slice(0, 5);
-    if (task.date === today && taskTime === currentTime && !task.done && !activeAlarms[task.id] && !dismissedAlarms.has(task.id)) {
-      activeAlarms[task.id] = task.text;
-      newAlarmTask = task;
+    if (task.date === today && taskTime === currentTime
+        && !task.done && !activeAlarms[task.id] && !dismissedAlarms.has(task.id)) {
+      triggerAlarm(task.text, task.id);
     }
   });
-
-  if (newAlarmTask && !alarmRinging) {
-    alarmRinging = true;
-    document.getElementById("alarmBanner").style.display = "block";
-    document.getElementById("alarmBanner").textContent = "🔔 ALARM: " + newAlarmTask.text + " — Press Stop Alarm to dismiss.";
-    playAlarmSound();
-    startVoiceAnnouncement(newAlarmTask.text);
-  }
 }, 1000);
 
+// ── Service Worker + Web Push setup ──────────────────────────────────────────
+async function setupPushNotifications() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    document.getElementById("statusMsg").textContent = "⚠ Push notifications not supported in this browser.";
+    return;
+  }
+  try {
+    const reg = await navigator.serviceWorker.register("/service-worker.js");
+    await navigator.serviceWorker.ready;
+
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      document.getElementById("statusMsg").textContent = "⚠ Allow notifications to enable background alarms.";
+      return;
+    }
+
+    const keyRes = await fetch("/api/vapid-public-key");
+    const { publicKey } = await keyRes.json();
+
+    let subscription = await reg.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey)
+      });
+    }
+
+    await fetch("/api/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-user-id": USER_ID },
+      body: JSON.stringify(subscription)
+    });
+
+    document.getElementById("statusMsg").textContent = "✅ Background alarms ON — works even when tab is closed.";
+  } catch (err) {
+    console.error("Push setup error:", err);
+    document.getElementById("statusMsg").textContent = "⚠ Could not enable background alarms.";
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - base64String.length % 4) % 4);
+  const base64  = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw     = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
 loadTasks();
 setInterval(loadTasks, 30000);
+setupPushNotifications();
 </script>
 </body>
 </html>
